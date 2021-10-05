@@ -3,7 +3,7 @@ on: pull_request
 jobs:
   shellcheck:
     name: shellcheck
-    runs-on: ubuntu-16.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v1
       - uses: ludeeus/action-shellcheck@master
@@ -11,7 +11,7 @@ jobs:
           severity: style
   shellspec:
     name: shellspec
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04
     steps:
       - uses: actions/checkout@v1
       - run: |
