@@ -3,7 +3,7 @@ on: pull_request
 jobs:
   shellcheck:
     name: shellcheck
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v1
       - uses: ludeeus/action-shellcheck@master
@@ -15,5 +15,6 @@ jobs:
     steps:
       - uses: actions/checkout@v1
       - run: |
+         git --version
          curl -fsSL https://git.io/shellspec | sh -s -- --yes
          ${HOME}/.local/bin/shellspec -x --log-file log.txt || cat log.txt
