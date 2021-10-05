@@ -15,7 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v1
       - run: |
-         sudo apt-get install -y --allow-downgrades git=1:2.25.1-1ubuntu3.2 git-man=1:2.25.1-1ubuntu3.2
-         git --version
+         echo "Global options:"
+         git config --list --global | sort
+         echo "Local options:"
+         git config --list | sort
          curl -fsSL https://git.io/shellspec | sh -s -- --yes
          ${HOME}/.local/bin/shellspec -x --log-file log.txt || cat log.txt
