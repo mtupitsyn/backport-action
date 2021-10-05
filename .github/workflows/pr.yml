@@ -15,8 +15,5 @@ jobs:
     steps:
       - uses: actions/checkout@v1
       - run: |
-         git config --global init.defaultBranch master
          curl -fsSL https://git.io/shellspec | sh -s -- --yes
-         ${HOME}/.local/bin/shellspec -x --log-file log.txt
-         cat log.txt
-         ls -al
+         ${HOME}/.local/bin/shellspec -x --log-file log.txt || cat log.txt
