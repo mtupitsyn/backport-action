@@ -203,7 +203,7 @@ http_post invoked with:comments-url {\"body\":\"Unable to cherry-pick commit * o
     It 'Pushes'
       When call push 'backport-branch'
       The value "$(cd "${git_repository}" && git show backport-branch:file)" should equal "modified"
-      The output should start with "Branch 'backport-branch' set up to track remote branch 'backport-branch' from 'origin'"
+      The output should match pattern "::debug::out: Branch 'backport-branch' set up to track remote branch 'backport-branch' from 'origin'"
     End
   End
 
