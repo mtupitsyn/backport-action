@@ -15,11 +15,5 @@ jobs:
     steps:
       - uses: actions/checkout@v1
       - run: |
-         echo "System options:"
-         git config --list --system | sort
-         echo "Global options:"
-         git config --list --global | sort
-         echo "Local options:"
-         git config --list | sort
          curl -fsSL https://git.io/shellspec | sh -s -- --yes
-         ${HOME}/.local/bin/shellspec -x --log-file log.txt || cat log.txt
+         ${HOME}/.local/bin/shellspec
