@@ -98,7 +98,7 @@ cherry_pick() {
   local merge_sha=$4
 
   output=''
-  debug output git clone -q --no-tags -b "${branch}" "${repository}" "${GITHUB_WORKSPACE}" || fail "Unable to clone from repository \`${repository}\` a branch named \`${branch}\`, this should not have happened" &&
+  test -d "${GITHUB_WORKSPACE}/.git" && debug output git -C "${GITHUB_WORKSPACE}" checkout -b "${branch}" -t "origin/${branch}" || debug output git clone -q --no-tags -b "${branch}" "${repository}" "${GITHUB_WORKSPACE}" || fail "Unable to clone from repository \`${repository}\` a branch named \`${branch}\`, this should not have happened" &&
   (
     cd "${GITHUB_WORKSPACE}"
 
@@ -134,8 +134,7 @@ push() {
 
     set +e
 
-    echo -ne ""
-    git -c user.name="${user_name}" -c user.email="${user_email}" -c "http.https://github.com.extraheader=Authorization: basic ${auth}" push -v --set-upstream origin "${backport_branch}" || fail "Unable to push the backported branch, did you try to backport the same PR twice without deleting the \`${backport_branch}\` branch?"
+    debug output git -c user.name="${user_name}" -c user.email="${user_email}" -c "http.https://github.com.extraheader=Authorization: basic ${auth}" push -q --set-upstream origin "${backport_branch}" || fail "Unable to push the backported branch, did you try to backport the same PR twice without deleting the \`${backport_branch}\` branch?"
 
     set -e
   )
