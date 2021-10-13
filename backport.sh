@@ -70,18 +70,20 @@ fail() {
   echo "::error::${message} (${error})"
   echo '::endgroup::'
 
-  local comment="${message}"
-  if [ -n "${error}" ]
-  then
-    comment+="\n\n<details><summary>Error</summary><pre>${error}</pre></details>"
+  if [ "${BACKPORT_REPORT_FAILURE:-}" == "true" ]; then
+    local comment="${message}"
+    if [ -n "${error}" ]
+    then
+      comment+="\n\n<details><summary>Error</summary><pre>${error}</pre></details>"
+    fi
+    local comment_json
+    comment_json="$(jq -n -c --arg body "${comment}" '{"body": $body|gsub ("\\\\n";"\n")}')"
+
+    local comments_url
+    comments_url=$(jq --raw-output .pull_request._links.comments.href "${GITHUB_EVENT_PATH}")
+
+    http_post "${comments_url}" "${comment_json}"
   fi
-  local comment_json
-  comment_json="$(jq -n -c --arg body "${comment}" '{"body": $body|gsub ("\\\\n";"\n")}')"
-
-  local comments_url
-  comments_url=$(jq --raw-output .pull_request._links.comments.href "${GITHUB_EVENT_PATH}")
-
-  http_post "${comments_url}" "${comment_json}"
 
   exit 1
 }
@@ -91,6 +93,19 @@ auth_header() {
   echo -n "$(echo -n "x-access-token:${token}"|base64 --wrap=0)"
 }
 
+checkout() {
+  local branch=$1
+  local repository=$2
+
+  output=''
+  if [[ -d "${GITHUB_WORKSPACE}/.git" ]]; then
+    debug output git -C "${GITHUB_WORKSPACE}" checkout -B "${branch}" -t "origin/${branch}"
+    debug output git -C "${GITHUB_WORKSPACE}" pull --ff-only origin "${branch}"
+  else
+    debug output git clone -q --no-tags -b "${branch}" "${repository}" "${GITHUB_WORKSPACE}" || fail "Unable to clone from repository \`${repository}\` a branch named \`${branch}\`, this should not have happened"
+  fi
+}
+
 cherry_pick() {
   local branch=$1
   local repository=$2
@@ -98,7 +113,6 @@ cherry_pick() {
   local merge_sha=$4
 
   output=''
-  test -d "${GITHUB_WORKSPACE}/.git" && debug output git -C "${GITHUB_WORKSPACE}" checkout -b "${branch}" -t "origin/${branch}" || debug output git clone -q --no-tags -b "${branch}" "${repository}" "${GITHUB_WORKSPACE}" || fail "Unable to clone from repository \`${repository}\` a branch named \`${branch}\`, this should not have happened" &&
   (
     cd "${GITHUB_WORKSPACE}"
 
@@ -109,8 +123,8 @@ cherry_pick() {
 
     set +e
 
-    debug output git checkout -q -b "${backport_branch}" || fail "Unable to checkout branch named \`${branch}\`, you might need to create it or use a different label."
-
+    debug output git checkout -q -b "${backport_branch}" || fail "Unable to checkout branch named \`${backport_branch}\` from \`${branch}\`, you might need to create it or use a different label."
+    echo "::notice::Cherry-picking commit ${merge_sha} into branch \`${branch}\`"
     debug output git -c user.name="${user_name}" -c user.email="${user_email}" cherry-pick -x --mainline 1 "${merge_sha}" || fail "Unable to cherry-pick commit ${merge_sha} on top of branch \`${branch}\`.\n\nThis pull request needs to be backported manually." "${output}
 $(git status)"
 
@@ -161,12 +175,48 @@ create_pull_request() {
   http_post "${pulls_url}" "${pull_request}"
 }
 
+backport_dry_run() {
+  local number=$1
+  local branch=$2
+  output=''
+  (
+    echo "::group::Performing dry run of backporting PR #${number} to branch ${branch}"
+
+    local repository
+    repository=$(jq --raw-output .repository.clone_url "${GITHUB_EVENT_PATH}")
+
+    local backport_branch
+    backport_branch="backport/${number}-to-${branch}"
+
+    local backport_test_branch
+    backport_test_branch="backport/test/${number}-to-${branch}"
+
+    checkout "${GITHUB_HEAD_REF}" "${repository}"
+    cd "${GITHUB_WORKSPACE}"
+
+    local user_name
+    user_name="$(git --no-pager log --format=format:'%an' -n 1)"
+    local user_email
+    user_email="$(git --no-pager log --format=format:'%ae' -n 1)"
+
+    checkout "${GITHUB_BASE_REF}" "${repository}"
+    debug output git checkout -b "${backport_test_branch}"
+    debug output git -c user.name="${user_name}" -c user.email="${user_email}" merge --no-edit --no-ff "${GITHUB_HEAD_REF}"
+    local merge_sha
+    merge_sha=$(git log -1 --format=%H)
+
+    debug output git checkout "${branch}"
+    cherry_pick "${branch}" "${repository}" "${backport_branch}" "${merge_sha}"
+    debug output git branch -D "${backport_test_branch}"
+    echo '::endgroup::'
+  )
+}
+
 backport() {
   local number=$1
   local branch=$2
 
-  echo '::group::Performing backport'
-  echo "::debug::Backporting pull request #${number} to branch ${branch}"
+  echo "::group::Performing backport of PR #${number} to branch ${branch}"
 
   local repository
   repository=$(jq --raw-output .repository.clone_url "${GITHUB_EVENT_PATH}")
@@ -177,6 +227,7 @@ backport() {
   local merge_sha
   merge_sha=$(jq --raw-output .pull_request.merge_commit_sha "${GITHUB_EVENT_PATH}")
 
+  checkout "${branch}" "${repository}"
   cherry_pick "${branch}" "${repository}" "${backport_branch}" "${merge_sha}"
   push "${backport_branch}"
 
@@ -281,14 +332,21 @@ main() {
     return
   fi
 
-  if [[ "$merged" != "true" ]]; then
-    return
-  fi
-
   local number
   number=$(jq --raw-output .number "${GITHUB_EVENT_PATH}")
   local labels
-  labels=$(jq --raw-output .pull_request.labels[].name "${GITHUB_EVENT_PATH}")
+  labels="${BACKPORT_LABEL}"
+  if [ -z "${labels}" ]; then
+    echo "::debug::Environment variable BACKPORT_LABEL is not set, will iterate over all PR labels"
+    labels=$(jq --raw-output .pull_request.labels[].name "${GITHUB_EVENT_PATH}")
+  else
+    echo "::debug::Environment variable BACKPORT_LABEL is set, will use it to perform backport"
+  fi
+  echo "::debug::Cleaning up workspace"
+  cd "${RUNNER_TEMP}"
+  rm -Rf "${GITHUB_WORKSPACE}"
+  mkdir -p "${GITHUB_WORKSPACE}"
+  cd "${GITHUB_WORKSPACE}"
 
   local default_ifs="${IFS}"
   IFS=$'\n'
@@ -298,7 +356,11 @@ main() {
     if [[ "${label}" == 'backport '* ]]; then
       local branch=${label#* }
       check_token
-      backport "${number}" "${branch}"
+      if [[ "$merged" != "true" ]]; then
+        backport_dry_run "${number}" "${branch}"
+      else
+        backport "${number}" "${branch}"
+      fi
     fi
   done
 }
