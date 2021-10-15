@@ -98,7 +98,12 @@ cherry_pick() {
   local merge_sha=$4
 
   output=''
-  test -d "${GITHUB_WORKSPACE}/.git" && debug output git -C "${GITHUB_WORKSPACE}" checkout -b "${branch}" -t "origin/${branch}" || debug output git clone -q --no-tags -b "${branch}" "${repository}" "${GITHUB_WORKSPACE}" || fail "Unable to clone from repository \`${repository}\` a branch named \`${branch}\`, this should not have happened" &&
+  if [[ -d "${GITHUB_WORKSPACE}/.git" ]]; then
+    debug output git -C "${GITHUB_WORKSPACE}" checkout -B "${branch}" -t "origin/${branch}"
+    debug output git -C "${GITHUB_WORKSPACE}" pull --ff-only origin "${branch}"
+  else
+    debug output git clone -q --no-tags -b "${branch}" "${repository}" "${GITHUB_WORKSPACE}" || fail "Unable to clone from repository \`${repository}\` a branch named \`${branch}\`, this should not have happened"
+  fi
   (
     cd "${GITHUB_WORKSPACE}"
 
