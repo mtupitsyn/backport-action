@@ -138,12 +138,23 @@ cherry_pick() {
     local user_email
     user_email="$(git --no-pager log --format=format:'%ae' -n 1)"
 
+    local commits
+    if git show "${merge_sha}" --compact-summary | grep -E -q ^Merge:; then
+        echo "::notice::Commit ${merge_sha} is a merge commit, PR was merged via 'Merge Commit' strategy. Dependent commits will be cherry-picked automatically."
+        commits="${merge_sha}"
+    else
+        echo "::notice::Commit ${merge_sha} is not a merge commit, PR was merged via 'Squash' or 'Rebase' strategy. Building list of commits to cherry-pick."
+        base_commit=$(jq --raw-output .pull_request.base.sha "${GITHUB_EVENT_PATH}")
+        commits=$(git log --format=%H --reverse ${base_commit}..${merge_sha})
+    fi
     set +e
 
     debug output git checkout -q -b "${backport_branch}" || fail "Unable to checkout branch named \`${backport_branch}\` from \`${branch}\`, you might need to create it or use a different label."
-    echo "::notice::Cherry-picking commit ${merge_sha} into branch \`${branch}\`"
-    debug output git -c user.name="${user_name}" -c user.email="${user_email}" cherry-pick -x --mainline 1 "${merge_sha}" || fail "Unable to cherry-pick commit ${merge_sha} on top of branch \`${branch}\`.\n\nThis pull request needs to be backported manually." "${output}
+    for commit in $commits; do
+      echo "::notice::Cherry-picking commit ${commit} into branch \`${branch}\`"
+      debug output git -c user.name="${user_name}" -c user.email="${user_email}" cherry-pick -x --mainline 1 "${commit}" || fail "Unable to cherry-pick commit ${merge_sha} on top of branch \`${branch}\`. This pull request needs to be backported manually." "${output}
 $(git status)"
+    done
 
     set -e
   )
