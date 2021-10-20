@@ -1,6 +1,9 @@
 #!/bin/bash
 set -o errexit -o pipefail -o nounset
 
+global_branches_success=""
+global_branches_failure=""
+
 newline_at_eof() {
   local file="$1"
   if [ -s "${file}" ] && [ "$(tail -c1 "${file}"; echo x)" != $'\nx' ]
@@ -66,11 +69,12 @@ http_post() {
 fail() {
   local message=$1
   local error=${2:-}
+  local merged
+  merged=$(jq --raw-output .pull_request.merged "${GITHUB_EVENT_PATH}")
 
   echo "::error::${message} (${error})"
-  echo '::endgroup::'
 
-  if [ "${BACKPORT_REPORT_FAILURE:-}" == "true" ]; then
+  if [ "${merged}" == "true" ]; then
     local comment="${message}"
     if [ -n "${error}" ]
     then
@@ -78,14 +82,10 @@ fail() {
     fi
     local comment_json
     comment_json="$(jq -n -c --arg body "${comment}" '{"body": $body|gsub ("\\\\n";"\n")}')"
-
-    local comments_url
     comments_url=$(jq --raw-output .pull_request._links.comments.href "${GITHUB_EVENT_PATH}")
-
     http_post "${comments_url}" "${comment_json}"
   fi
 
-  exit 1
 }
 
 auth_header() {
@@ -100,11 +100,11 @@ checkout() {
   output=''
   if [[ -d "${GITHUB_WORKSPACE}/.git" ]]; then
     debug output git -C "${GITHUB_WORKSPACE}" checkout -B "${branch}" -t "origin/${branch}" || \
-        (echo "::notice::Unexpected error checking out branch ${branch}, will try fresh clone" && clone "${branch}" "${repository}")
+        (echo "Unexpected error checking out branch ${branch}, will try fresh clone" && clone "${branch}" "${repository}")
     debug output git -C "${GITHUB_WORKSPACE}" pull --ff-only origin "${branch}" || \
-        (echo "::notice::Unexpected error refreshing branch ${branch}, will try fresh clone" && clone "${branch}" "${repository}")
+        (echo "Unexpected error refreshing branch ${branch}, will try fresh clone" && clone "${branch}" "${repository}")
   else
-    echo "::notice::Repo not found, will try fresh clone"
+    echo "Repo not found, will try fresh clone"
     clone "${branch}" "${repository}"
   fi
 }
@@ -114,11 +114,9 @@ clone() {
   local repository=$2
 
   output=''
-  echo "::notice::Cleaning up workspace"
-  cd "${RUNNER_TEMP}"
-  rm -Rf "${GITHUB_WORKSPACE}"
-  mkdir -p "${GITHUB_WORKSPACE}"
-  echo "::notice::Getting fresh repository clone"
+  echo "Cleaning up workspace"
+  find "${GITHUB_WORKSPACE}" -mindepth 1 -maxdepth 1 -exec rm -Rf \{\} \;
+  echo "Getting fresh repository clone"
   debug output git clone -q --no-tags -b "${branch}" "${repository}" "${GITHUB_WORKSPACE}" || fail "Unable to clone from repository \`${repository}\` a branch named \`${branch}\`, this should not have happened"
   cd "${GITHUB_WORKSPACE}"
 }
@@ -130,34 +128,45 @@ cherry_pick() {
   local merge_sha=$4
 
   output=''
-  (
-    cd "${GITHUB_WORKSPACE}"
 
-    local user_name
-    user_name="$(git --no-pager log --format=format:'%an' -n 1)"
-    local user_email
-    user_email="$(git --no-pager log --format=format:'%ae' -n 1)"
+  cd "${GITHUB_WORKSPACE}"
 
-    local commits
-    if git show "${merge_sha}" --compact-summary | grep -E -q ^Merge:; then
-        echo "::notice::Commit ${merge_sha} is a merge commit, PR was merged via 'Merge Commit' strategy. Dependent commits will be cherry-picked automatically."
-        commits="${merge_sha}"
+  local user_name
+  user_name="$(git --no-pager log --format=format:'%an' -n 1)"
+  local user_email
+  user_email="$(git --no-pager log --format=format:'%ae' -n 1)"
+
+  local commits
+  if git show "${merge_sha}" --compact-summary | grep -E -q ^Merge:; then
+      echo "Commit ${merge_sha} is a merge commit, PR was merged via 'Merge Commit' strategy. Dependent commits will be cherry-picked automatically."
+      commits="${merge_sha}"
+  else
+      echo "Commit ${merge_sha} is not a merge commit, PR was merged via 'Squash' or 'Rebase' strategy. Building list of commits to cherry-pick."
+      base_commit=$(jq --raw-output .pull_request.base.sha "${GITHUB_EVENT_PATH}")
+      commits=$(git log --format=%H --reverse "${base_commit}".."${merge_sha}")
+  fi
+
+  set +e
+
+  debug output git checkout -q -B "${backport_branch}" \
+    || fail "Unable to checkout branch named \`${backport_branch}\` from \`${branch}\`, you might need to create it or use a different label."
+
+  local exit_code=0
+  for commit in $commits; do
+    echo "Cherry-picking commit ${commit} into branch \`${branch}\`"
+    debug output git -c user.name="${user_name}" -c user.email="${user_email}" cherry-pick -x --mainline 1 "${commit}" || exit_code=1
+    if [ $exit_code -eq 0 ]; then
+      global_branches_success="${global_branches_success} ${branch}"
     else
-        echo "::notice::Commit ${merge_sha} is not a merge commit, PR was merged via 'Squash' or 'Rebase' strategy. Building list of commits to cherry-pick."
-        base_commit=$(jq --raw-output .pull_request.base.sha "${GITHUB_EVENT_PATH}")
-        commits=$(git log --format=%H --reverse ${base_commit}..${merge_sha})
-    fi
-    set +e
-
-    debug output git checkout -q -B "${backport_branch}" || fail "Unable to checkout branch named \`${backport_branch}\` from \`${branch}\`, you might need to create it or use a different label."
-    for commit in $commits; do
-      echo "::notice::Cherry-picking commit ${commit} into branch \`${branch}\`"
-      debug output git -c user.name="${user_name}" -c user.email="${user_email}" cherry-pick -x --mainline 1 "${commit}" || fail "Unable to cherry-pick commit ${commit} on top of branch \`${branch}\`. This pull request needs to be backported manually." "${output}
+      global_branches_failure="${global_branches_failure} ${branch}"
+      fail "Unable to cherry-pick commit ${commit} on top of branch \`${branch}\`. This pull request needs to be backported manually." "${output}
 $(git status)"
-    done
+      break
+    fi
+  done
 
-    set -e
-  )
+  set -e
+  return $exit_code
 }
 
 push() {
@@ -207,37 +216,36 @@ backport_dry_run() {
   local number=$1
   local branch=$2
   output=''
-  (
-    echo "::group::Performing dry run of backporting PR #${number} to branch ${branch}"
+  echo "::group::Performing dry run of backporting PR #${number} to branch ${branch}"
 
-    local repository
-    repository=$(jq --raw-output .repository.clone_url "${GITHUB_EVENT_PATH}")
+  local repository
+  repository=$(jq --raw-output .repository.clone_url "${GITHUB_EVENT_PATH}")
 
-    local backport_branch
-    backport_branch="backport/${number}-to-${branch}"
+  local backport_branch
+  backport_branch="backport/${number}-to-${branch}"
 
-    local backport_test_branch
-    backport_test_branch="backport/test/${number}-to-${branch}"
+  local backport_test_branch
+  backport_test_branch="backport/test/${number}-to-${branch}"
 
-    checkout "${GITHUB_HEAD_REF}" "${repository}"
-    cd "${GITHUB_WORKSPACE}"
+  checkout "${GITHUB_HEAD_REF}" "${repository}"
+  cd "${GITHUB_WORKSPACE}"
 
-    local user_name
-    user_name="$(git --no-pager log --format=format:'%an' -n 1)"
-    local user_email
-    user_email="$(git --no-pager log --format=format:'%ae' -n 1)"
+  local user_name
+  user_name="$(git --no-pager log --format=format:'%an' -n 1)"
+  local user_email
+  user_email="$(git --no-pager log --format=format:'%ae' -n 1)"
 
-    checkout "${GITHUB_BASE_REF}" "${repository}"
-    debug output git checkout -B "${backport_test_branch}"
-    debug output git -c user.name="${user_name}" -c user.email="${user_email}" merge --no-edit --no-ff "${GITHUB_HEAD_REF}"
-    local merge_sha
-    merge_sha=$(git log -1 --format=%H)
+  checkout "${GITHUB_BASE_REF}" "${repository}"
+  debug output git checkout -B "${backport_test_branch}"
+  debug output git -c user.name="${user_name}" -c user.email="${user_email}" merge --no-edit --no-ff "${GITHUB_HEAD_REF}"
+  local merge_sha
+  merge_sha=$(git log -1 --format=%H)
 
-    debug output git checkout "${branch}"
-    cherry_pick "${branch}" "${repository}" "${backport_branch}" "${merge_sha}"
-    debug output git branch -D "${backport_test_branch}"
-    echo '::endgroup::'
-  )
+  debug output git checkout "${branch}"
+  local exit_code=0
+  cherry_pick "${branch}" "${repository}" "${backport_branch}" "${merge_sha}" || exit_code=1
+  debug output git branch -D "${backport_test_branch}"
+  echo '::endgroup::'
 }
 
 backport() {
@@ -256,16 +264,19 @@ backport() {
   merge_sha=$(jq --raw-output .pull_request.merge_commit_sha "${GITHUB_EVENT_PATH}")
 
   checkout "${branch}" "${repository}"
-  cherry_pick "${branch}" "${repository}" "${backport_branch}" "${merge_sha}"
-  push "${backport_branch}"
+  local exit_code=0
+  cherry_pick "${branch}" "${repository}" "${backport_branch}" "${merge_sha}" || exit_code=1
+  if [ $exit_code -eq 0 ]; then
+    push "${backport_branch}"
 
-  local title
-  title=$(jq --raw-output .pull_request.title "${GITHUB_EVENT_PATH}")
+    local title
+    title=$(jq --raw-output .pull_request.title "${GITHUB_EVENT_PATH}")
 
-  local pulls_url
-  pulls_url=$(tmp=$(jq --raw-output .repository.pulls_url "${GITHUB_EVENT_PATH}"); echo "${tmp%{*}")
+    local pulls_url
+    pulls_url=$(tmp=$(jq --raw-output .repository.pulls_url "${GITHUB_EVENT_PATH}"); echo "${tmp%{*}")
 
-  create_pull_request "${branch}" "${backport_branch}" "${title}" "${number}" "${pulls_url}"
+    create_pull_request "${branch}" "${backport_branch}" "${title}" "${number}" "${pulls_url}"
+  fi
   echo '::endgroup::'
 }
 
@@ -337,6 +348,30 @@ check_token() {
   echo '::endgroup::'
 }
 
+post_check_status() {
+  local status_url
+  status_url=$(jq --raw-output .pull_request._links.statuses.href "${GITHUB_EVENT_PATH}")
+  local state
+  state=$(test -n "$global_branches_failure" && echo failure || echo success)
+  local description
+  if [ -n "${global_branches_success}" ] && [ -n "${global_branches_failure}" ]; then
+    description="can be backported: ${global_branches_success}, in conflict: ${global_branches_failure}"
+  elif [ -n "${global_branches_success}" ]; then
+    description="can be backported: ${global_branches_success}"
+  elif [ -n "${global_branches_failure}" ]; then
+    description="in conflict: ${global_branches_failure}"
+  else
+    description="nothing needs to be backported"
+  fi
+
+  local status_json="{
+      \"state\": \"${state}\",
+      \"context\": \"mergeability check\",
+      \"description\": \"${description}\"
+    }"
+  http_post "${status_url}" "${status_json}"
+}
+
 main() {
   echo '::group::Environment'
   for e in $(printenv)
@@ -363,13 +398,7 @@ main() {
   local number
   number=$(jq --raw-output .number "${GITHUB_EVENT_PATH}")
   local labels
-  labels="${BACKPORT_LABEL}"
-  if [ -z "${labels}" ]; then
-    echo "::debug::Environment variable BACKPORT_LABEL is not set, will iterate over all PR labels"
-    labels=$(jq --raw-output .pull_request.labels[].name "${GITHUB_EVENT_PATH}")
-  else
-    echo "::debug::Environment variable BACKPORT_LABEL is set, will use it to perform backport"
-  fi
+  labels=$(jq --raw-output .pull_request.labels[].name "${GITHUB_EVENT_PATH}")
 
   local default_ifs="${IFS}"
   IFS=$'\n'
@@ -386,9 +415,16 @@ main() {
       fi
     fi
   done
+  test "${merged}" != "true" && post_check_status
 }
 
 
 ${__SOURCED__:+return}
 
 main "$@"
+
+if [ -n "${global_branches_failure}" ]; then
+  exit 1
+else
+  exit 0
+fi
