@@ -99,11 +99,28 @@ checkout() {
 
   output=''
   if [[ -d "${GITHUB_WORKSPACE}/.git" ]]; then
-    debug output git -C "${GITHUB_WORKSPACE}" checkout -B "${branch}" -t "origin/${branch}"
-    debug output git -C "${GITHUB_WORKSPACE}" pull --ff-only origin "${branch}"
+    debug output git -C "${GITHUB_WORKSPACE}" checkout -B "${branch}" -t "origin/${branch}" || \
+        (echo "::notice::Unexpected error checking out branch ${branch}, will try fresh clone" && clone "${branch}" "${repository}")
+    debug output git -C "${GITHUB_WORKSPACE}" pull --ff-only origin "${branch}" || \
+        (echo "::notice::Unexpected error refreshing branch ${branch}, will try fresh clone" && clone "${branch}" "${repository}")
   else
-    debug output git clone -q --no-tags -b "${branch}" "${repository}" "${GITHUB_WORKSPACE}" || fail "Unable to clone from repository \`${repository}\` a branch named \`${branch}\`, this should not have happened"
+    echo "::notice::Repo not found, will try fresh clone"
+    clone "${branch}" "${repository}"
   fi
+}
+
+clone() {
+  local branch=$1
+  local repository=$2
+
+  output=''
+  echo "::notice::Cleaning up workspace"
+  cd "${RUNNER_TEMP}"
+  rm -Rf "${GITHUB_WORKSPACE}"
+  mkdir -p "${GITHUB_WORKSPACE}"
+  echo "::notice::Getting fresh repository clone"
+  debug output git clone -q --no-tags -b "${branch}" "${repository}" "${GITHUB_WORKSPACE}" || fail "Unable to clone from repository \`${repository}\` a branch named \`${branch}\`, this should not have happened"
+  cd "${GITHUB_WORKSPACE}"
 }
 
 cherry_pick() {
@@ -342,11 +359,6 @@ main() {
   else
     echo "::debug::Environment variable BACKPORT_LABEL is set, will use it to perform backport"
   fi
-  echo "::debug::Cleaning up workspace"
-  cd "${RUNNER_TEMP}"
-  rm -Rf "${GITHUB_WORKSPACE}"
-  mkdir -p "${GITHUB_WORKSPACE}"
-  cd "${GITHUB_WORKSPACE}"
 
   local default_ifs="${IFS}"
   IFS=$'\n'
