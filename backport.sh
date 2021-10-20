@@ -149,10 +149,10 @@ cherry_pick() {
     fi
     set +e
 
-    debug output git checkout -q -b "${backport_branch}" || fail "Unable to checkout branch named \`${backport_branch}\` from \`${branch}\`, you might need to create it or use a different label."
+    debug output git checkout -q -B "${backport_branch}" || fail "Unable to checkout branch named \`${backport_branch}\` from \`${branch}\`, you might need to create it or use a different label."
     for commit in $commits; do
       echo "::notice::Cherry-picking commit ${commit} into branch \`${branch}\`"
-      debug output git -c user.name="${user_name}" -c user.email="${user_email}" cherry-pick -x --mainline 1 "${commit}" || fail "Unable to cherry-pick commit ${merge_sha} on top of branch \`${branch}\`. This pull request needs to be backported manually." "${output}
+      debug output git -c user.name="${user_name}" -c user.email="${user_email}" cherry-pick -x --mainline 1 "${commit}" || fail "Unable to cherry-pick commit ${commit} on top of branch \`${branch}\`. This pull request needs to be backported manually." "${output}
 $(git status)"
     done
 
