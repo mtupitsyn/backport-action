@@ -228,7 +228,7 @@ backport_dry_run() {
     user_email="$(git --no-pager log --format=format:'%ae' -n 1)"
 
     checkout "${GITHUB_BASE_REF}" "${repository}"
-    debug output git checkout -b "${backport_test_branch}"
+    debug output git checkout -B "${backport_test_branch}"
     debug output git -c user.name="${user_name}" -c user.email="${user_email}" merge --no-edit --no-ff "${GITHUB_HEAD_REF}"
     local merge_sha
     merge_sha=$(git log -1 --format=%H)
