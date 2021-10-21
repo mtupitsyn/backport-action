@@ -157,6 +157,7 @@ cherry_pick() {
     debug output git -c user.name="${user_name}" -c user.email="${user_email}" cherry-pick -x --mainline 1 "${commit}" || exit_code=1
     if [ $exit_code -eq 0 ]; then
       global_branches_success="${global_branches_success} ${branch}"
+      echo "Commit cherry-picked successfully"
     else
       global_branches_failure="${global_branches_failure} ${branch}"
       fail "Unable to cherry-pick commit ${commit} on top of branch \`${branch}\`. This pull request needs to be backported manually." "${output}
@@ -364,11 +365,7 @@ post_check_status() {
     description="nothing needs to be backported"
   fi
 
-  local status_json="{
-      \"state\": \"${state}\",
-      \"context\": \"mergeability check\",
-      \"description\": \"${description}\"
-    }"
+  local status_json="{\"state\": \"${state}\", \"context\": \"mergeability check\", \"description\": \"${description}\"}"
   http_post "${status_url}" "${status_json}"
 }
 
