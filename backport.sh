@@ -412,7 +412,9 @@ main() {
       fi
     fi
   done
-  test "${merged}" != "true" && post_check_status
+  if [ "${merged}" != "true" ]; then
+    post_check_status
+  fi
 }
 
 
